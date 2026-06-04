@@ -1,0 +1,92 @@
+name: Build IP lists
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - ".gitignore"
+      - "LICENSE*"
+      - "*.md"
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      with:
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: pip install --upgrade pip
+
+    - name: Download CSV
+      run: |
+        curl -L "https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/dbip-geo-whois-asn-country/dbip-geo-whois-asn-country-ipv4.csv" -o dbip-geo-whois-asn-country-ipv4.csv
+        curl -L "https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/geolite2-geo-whois-asn-country/geolite2-geo-whois-asn-country-ipv4.csv" -o geolite2-geo-whois-asn-country-ipv4.csv
+        curl -L "https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/geo-whois-asn-country/geo-whois-asn-country-ipv4.csv" -o geo-whois-asn-country-ipv4.csv
+        curl -L "https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/dbip-country/dbip-country-ipv4.csv" -o dbip-country-ipv4.csv
+        curl -L "https://raw.githubusercontent.com/sapics/ip-location-db/refs/heads/main/geolite2-country/geolite2-country-ipv4.csv" -o geolite2-country-ipv4.csv
+        
+    - name: Generate country lists
+      run: |
+        mkdir -p db/dbip-geo-whois-asn-country-ipv4
+        mkdir -p db/geolite2-geo-whois-asn-country-ipv4
+        mkdir -p db/geo-whois-asn-country-ipv4
+        mkdir -p db/dbip-country-ipv4
+        mkdir -p db/geolite2-country-ipv4
+        python parse.py dbip-geo-whois-asn-country-ipv4
+        python parse.py geolite2-geo-whois-asn-country-ipv4
+        python parse.py geo-whois-asn-country-ipv4
+        python parse.py dbip-country-ipv4
+        python parse.py geolite2-country-ipv4
+
+    - name: Install mihomo
+      run: |
+        M_VER=$(curl -fSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+          | grep '"tag_name":' \
+          | sed -E 's/.*"v([^"]+)".*/\1/')
+    
+        if [[ -z "$M_VER" ]]; then
+          echo "❌ GitHub API returned no tag_name"
+          exit 1
+        fi
+        echo "Latest mihomo version: $M_VER"
+        wget -O mihomo.gz https://github.com/MetaCubeX/mihomo/releases/download/v${M_VER}/mihomo-linux-amd64-v${M_VER}.gz
+        gunzip -f mihomo.gz
+        chmod +x mihomo
+        sudo mv mihomo /usr/local/bin/
+        mihomo -v
+
+    - name: Convert .lst to .mrs
+      run: |
+        find . -type f -name "*.lst" | while read file; do
+          mihomo convert-ruleset ipcidr text "$file" "${file%.lst}.mrs"
+        done
+
+    - name: Commit and push generated files
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      id: date
+      run: |
+        CURRENT_DATE=$(date -u +'%Y-%m-%dT%H:%M:%S')
+        
+        git config user.name "${{ github.actor }}"
+        git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+        
+        git add db/*
+        
+        git commit -m "Update country IP lists $CURRENT_DATE" || echo "No changes"
+        git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
